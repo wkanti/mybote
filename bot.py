@@ -14,7 +14,7 @@ from aiogram.types import (
     Message,
 )
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "9201725425:AAGVKChuDRd3V9CnKjZfbLY2S8ShN9JxuRE)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = {8922424402}  # админ
 CODE_TTL = 300  # код живёт 5 минут
 DB = "bot.db"
