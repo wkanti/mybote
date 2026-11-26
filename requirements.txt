@@ -1,3 +1,2 @@
-aiogram>=3.4
-aiosqlite
-python-dotenv
+aiogram>=3.13,<4
+telethon>=1.36
