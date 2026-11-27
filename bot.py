@@ -439,6 +439,7 @@ async def main():
             except Exception:
                 pass
     asyncio.create_task(auto_backup(bot, db))
+    await bot.delete_webhook(drop_pending_updates=True)  # старый бот мог оставить вебхук
     try:
         await dp.start_polling(bot)
     finally:
