@@ -7,6 +7,7 @@ import sqlite3
 import time
 from html import escape
 
+from aiohttp import web
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -411,6 +412,24 @@ async def auto_backup(bot, db):
             log.exception("Автобэкап не удался")
 
 
+async def start_web():
+    """Для Render Web Service: открываем порт, чтобы сервис считался живым.
+    Сюда же можно слать пинг (UptimeRobot), чтобы бесплатный сервер не засыпал."""
+    port = os.getenv("PORT")
+    if not port:
+        return None
+
+    async def ok(request):
+        return web.Response(text="KantiMSG bot is running")
+
+    app = web.Application()
+    app.router.add_get("/", ok)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", int(port)).start()
+    return runner
+
+
 async def main():
     logging.basicConfig(level=logging.INFO)
     if not config.BOT_TOKEN or config.BOT_TOKEN == "ВСТАВЬ_ТОКЕН":
@@ -420,6 +439,7 @@ async def main():
 
     db = DB(config.DB_PATH)
     bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    web_runner = await start_web()
     tele = Tele(db, bot)
     dp = Dispatcher(db=db, tele=tele)
     dp.update.outer_middleware(UserMW(db))
@@ -443,7 +463,14 @@ async def main():
     try:
         await dp.start_polling(bot)
     finally:
+        # перед остановкой сервера (деплой, перезапуск) присылаем копию базы
+        try:
+            await admin_panel.send_backup(bot, db)
+        except Exception:
+            log.exception("Бэкап при остановке не удался")
         await tele.stop_all()
+        if web_runner:
+            await web_runner.cleanup()
 
 
 if __name__ == "__main__":
