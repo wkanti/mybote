@@ -106,24 +106,37 @@ class DB:
         )
         return cur.lastrowid, True
 
+    def _new_virtual_number(self):
+        """Виртуальный номер KantiMSG вида +39 3XX XXXXXXX. Настоящей SIM за ним нет."""
+        for _ in range(100):
+            phone = "+393" + f"{secrets.randbelow(100):02d}" + f"{secrets.randbelow(10 ** 7):07d}"
+            if not self.one("SELECT 1 FROM numbers WHERE phone=?", (phone,)):
+                return phone
+        raise RuntimeError("не удалось создать номер")
+
     def claim_free(self, uid):
-        """Выдаёт свободный +39. Возвращает (статус, строка): ok / limit / empty."""
+        """Выдаёт +39. Берёт свободный из базы, а если таких нет, создаёт новый сам.
+        Возвращает (статус, номер): ok / limit."""
         have = self.one(
             "SELECT COUNT(*) c FROM numbers WHERE owner_id=? AND kind='free'", (uid,)
         )["c"]
         if have >= config.FREE_LIMIT:
             return "limit", None
+        now = int(time.time())
         row = self.one(
             "SELECT id, phone FROM numbers WHERE kind='free' AND owner_id IS NULL "
             "ORDER BY id LIMIT 1"
         )
-        if not row:
-            return "empty", None
-        self.x(
-            "UPDATE numbers SET owner_id=?, assigned_at=? WHERE id=?",
-            (uid, int(time.time()), row["id"]),
+        if row:
+            self.x("UPDATE numbers SET owner_id=?, assigned_at=? WHERE id=?", (uid, now, row["id"]))
+            return "ok", {"id": row["id"], "phone": row["phone"]}
+        phone = self._new_virtual_number()
+        cur = self.x(
+            "INSERT INTO numbers(phone, kind, session, owner_id, assigned_at, added_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (phone, "free", None, uid, now, now),
         )
-        return "ok", row
+        return "ok", {"id": cur.lastrowid, "phone": phone}
 
     def add_code(self, number_id, code, text):
         self.x(
@@ -372,12 +385,13 @@ async def nums(cb: CallbackQuery, db):
 async def claim(cb: CallbackQuery, db):
     status, row = db.claim_free(cb.from_user.id)
     if status == "ok":
-        text = (f"✅ Твой номер: <b>{escape(row['phone'])}</b>\n"
-                "Он закреплён за тобой. Код придёт сюда сам, когда его отправят на номер.")
-    elif status == "limit":
-        text = "У тебя уже есть бесплатный номер. Анонимные +888 покупаются у " + escape(config.SHOP_CONTACT) + "."
+        text = (f"✅ Твой номер: <b>{escape(row['phone'])}</b>\n\n"
+                "Он закреплён за тобой. Введи его в приложении KantiMSG, и код для входа "
+                "придёт сюда, в этот чат.\n\n"
+                "Это номер для KantiMSG: SIM-карты за ним нет, обычные SMS на него не приходят.")
     else:
-        text = "Свободных номеров +39 сейчас нет. Загляни позже."
+        text = ("У тебя уже есть бесплатный номер, смотри его в разделе «Мои номера». "
+                "Анонимные +888 покупаются у " + escape(config.SHOP_CONTACT) + ".")
     b = InlineKeyboardBuilder()
     b.button(text="📱 Мои номера", callback_data="nums")
     b.button(text="⬅️ Меню", callback_data="menu")
