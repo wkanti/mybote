@@ -1,7 +1,9 @@
 import asyncio
+import hmac
 import logging
 import os
 import re
+import secrets
 import shutil
 import sqlite3
 import time
@@ -412,19 +414,114 @@ async def auto_backup(bot, db):
             log.exception("Автобэкап не удался")
 
 
-async def start_web():
-    """Для Render Web Service: открываем порт, чтобы сервис считался живым.
-    Сюда же можно слать пинг (UptimeRobot), чтобы бесплатный сервер не засыпал."""
+LOGIN = {}  # цифры номера -> {"code", "exp", "tries", "sent"}; коды входа живут 5 минут
+
+
+def jr(data, status=200):
+    return web.json_response(data, status=status)
+
+
+async def read_json(request):
+    try:
+        data = await request.json()
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def make_web_app(db, bot):
+    """Адреса для приложения KantiMSG: /api/login/start и /api/login/verify."""
+
+    @web.middleware
+    async def cors(request, handler):
+        if request.method == "OPTIONS":
+            resp = web.Response(status=204)
+        else:
+            try:
+                resp = await handler(request)
+            except web.HTTPException as e:
+                resp = e
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-API-Key"
+        resp.headers["Access-Control-Allow-Methods"] = "POST, GET, OPTIONS"
+        resp.headers["Access-Control-Max-Age"] = "86400"
+        return resp
+
+    def check_key(request):
+        return hmac.compare_digest(request.headers.get("X-API-Key", ""), config.API_KEY)
+
+    def find_number(digits):
+        return db.one("SELECT id, phone, owner_id FROM numbers WHERE phone=?", ("+" + digits,))
+
+    async def root(request):
+        return web.Response(text="KantiMSG bot is running")
+
+    async def login_start(request):
+        if not check_key(request):
+            return jr({"ok": False, "error": "forbidden"}, 403)
+        data = await read_json(request)
+        digits = re.sub(r"\D", "", str(data.get("number", "")))
+        if not 7 <= len(digits) <= 15:
+            return jr({"ok": False, "error": "bad_number"})
+        n = find_number(digits)
+        if not n or not n["owner_id"]:
+            return jr({"ok": False, "error": "number_not_found"})
+        if db.is_banned(n["owner_id"]):
+            return jr({"ok": False, "error": "banned"})
+        now = time.time()
+        st = LOGIN.get(digits)
+        if st and now - st["sent"] < 20:
+            return jr({"ok": False, "error": "too_many_requests"})
+        code = f"{secrets.randbelow(1000000):06d}"
+        try:
+            await bot.send_message(
+                n["owner_id"],
+                f"🔐 Код для входа в KantiMSG по номеру <b>{escape(n['phone'])}</b>:\n"
+                f"<code>{code}</code>\n\n"
+                "Действует 5 минут. Никому не сообщайте код.",
+            )
+        except Exception:
+            log.exception("Не удалось отправить код входа")
+            return jr({"ok": False, "error": "cannot_send"})
+        LOGIN[digits] = {"code": code, "exp": now + 300, "tries": 0, "sent": now}
+        return jr({"ok": True})
+
+    async def login_verify(request):
+        if not check_key(request):
+            return jr({"ok": False, "error": "forbidden"}, 403)
+        data = await read_json(request)
+        digits = re.sub(r"\D", "", str(data.get("number", "")))
+        code = str(data.get("code", "")).strip()
+        st = LOGIN.get(digits)
+        if not st or time.time() > st["exp"]:
+            LOGIN.pop(digits, None)
+            return jr({"ok": False, "error": "wrong_code"})
+        st["tries"] += 1
+        if st["tries"] > 5:
+            LOGIN.pop(digits, None)
+            return jr({"ok": False, "error": "wrong_code"})
+        if not hmac.compare_digest(st["code"], code):
+            return jr({"ok": False, "error": "wrong_code"})
+        n = find_number(digits)
+        if not n or not n["owner_id"]:
+            return jr({"ok": False, "error": "number_not_found"})
+        LOGIN.pop(digits, None)
+        return jr({"ok": True, "tg_id": n["owner_id"]})
+
+    app = web.Application(middlewares=[cors], client_max_size=64 * 1024)
+    app.router.add_get("/", root)
+    app.router.add_post("/api/login/start", login_start)
+    app.router.add_post("/api/login/verify", login_verify)
+    return app
+
+
+async def start_web(db, bot):
+    """Открывает порт (Render Web Service) и обслуживает вход из приложения.
+    На / можно слать пинг (UptimeRobot), чтобы бесплатный сервер не засыпал."""
     port = os.getenv("PORT")
     if not port:
         return None
-
-    async def ok(request):
-        return web.Response(text="KantiMSG bot is running")
-
-    app = web.Application()
-    app.router.add_get("/", ok)
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(make_web_app(db, bot))
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", int(port)).start()
     return runner
@@ -439,7 +536,7 @@ async def main():
 
     db = DB(config.DB_PATH)
     bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    web_runner = await start_web()
+    web_runner = await start_web(db, bot)
     tele = Tele(db, bot)
     dp = Dispatcher(db=db, tele=tele)
     dp.update.outer_middleware(UserMW(db))
